@@ -35,6 +35,7 @@ def process_files_in_folder(folder, m_start, m_end):
                 processed_files = True
 
     if not processed_files:
+        # Reportar espacio en blanco si no se encuentran archivos
         minerals_row.update(
             {col: None for col in minerals_row if col not in ["Hole ID", "From", "To"]}
         )
@@ -51,11 +52,14 @@ def process_mineral_data(df, m_start, m_end):
     if total_presence > 0:
         for _, mineral in df.iterrows():
             base_name = re.sub(r"\d+$", "", mineral["Class"]).strip()
-            if base_name not in mineral_presence:
-                mineral_presence[base_name] = 0
-            mineral_presence[base_name] += (
+            presence = (
                 mineral["Presence (%)"] if pd.notna(mineral["Presence (%)"]) else 0
             )
+            if presence > 0:
+                if base_name not in mineral_presence:
+                    mineral_presence[base_name] = 0
+                mineral_presence[base_name] += presence
+
         sorted_minerals = sorted(mineral_presence.keys())
         for mineral in sorted_minerals:
             row[mineral] = mineral_presence[mineral]
@@ -64,11 +68,15 @@ def process_mineral_data(df, m_start, m_end):
 
 def process_element_data(df):
     row = {}
+    elements_to_convert = {"Mo", "Zn", "Ba", "Ag", "As", "Pb"}  # Elementos específicos
     element_data = df[df["Class"] == "TOTAL"]
     if not element_data.empty:
         for col in element_data.columns:
             if col not in ["Class", "Presence (%)", "Density", "Hardness"]:
-                row[col] = element_data.iloc[0][col]
+                value = element_data.iloc[0][col]
+                row[col] = value  # Mantener el valor original en la columna principal
+                if col in elements_to_convert and value > 0:
+                    row[col + " (ppm)"] = int(value * 10000)  # Convertir a PPM y luego a entero
     return row
 
 
@@ -85,19 +93,36 @@ def format_worksheet(ws):
             if cell.row == 1:
                 cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center", vertical="center")
-            if cell.column >= 4:  # Apply format from the 4th column onward
+            
+            # Aplicar formato de número entero a las columnas PPM
+            if ws.cell(row=1, column=cell.column).value.endswith("(ppm)"):
+                cell.number_format = "0"  # Formato de número entero
+                if cell.row > 1:  # Aplicar formato condicional a datos (no a la cabecera)
+                    ws.conditional_formatting.add(
+                        f"{get_column_letter(cell.column)}2:{get_column_letter(cell.column)}{ws.max_row}",
+                        ColorScaleRule(
+                            start_type="num",
+                            start_value=0,
+                            start_color="FFFFFF",
+                            end_type="num",
+                            end_value=10000,
+                            end_color="FF0000",
+                        ),
+                    )
+            elif cell.column >= 4:
                 cell.number_format = "0.000"
-                ws.conditional_formatting.add(
-                    f"{get_column_letter(cell.column)}{cell.row}:{get_column_letter(cell.column)}{ws.max_row}",
-                    ColorScaleRule(
-                        start_type="num",
-                        start_value=0,
-                        start_color="FFFFFF",
-                        end_type="num",
-                        end_value=100,
-                        end_color="1C7D04",
-                    ),
-                )
+                if cell.row > 1:  # Aplicar formato condicional para otros elementos
+                    ws.conditional_formatting.add(
+                        f"{get_column_letter(cell.column)}2:{get_column_letter(cell.column)}{ws.max_row}",
+                        ColorScaleRule(
+                            start_type="num",
+                            start_value=0,
+                            start_color="FFFFFF",
+                            end_type="num",
+                            end_value=100,
+                            end_color="00FF00",  # Color verde
+                        ),
+                    )
 
     # Set column width for all columns
     for col in range(1, ws.max_column + 1):
@@ -168,11 +193,29 @@ def main():
             minerals_df = pd.DataFrame(minerals_result)
             elements_df = pd.DataFrame(elements_result)
 
-            # Eliminate the "TOTAL" column from output
-            if "TOTAL" in minerals_df:
+            # Ordenar columnas alfabéticamente
+            minerals_df = minerals_df[
+                ["Hole ID", "From", "To"] + sorted(minerals_df.columns[3:])
+            ]
+            elements_df = elements_df[
+                ["Hole ID", "From", "To"] + sorted(elements_df.columns[3:])
+            ]
+
+            # Reemplazar NaN con 0.000 solo si no se encontraron archivos
+            if minerals_df.isna().any().any():
+                minerals_df.fillna(0.000, inplace=True)
+            if elements_df.isna().any().any():
+                elements_df.fillna(0.000, inplace=True)
+
+            # Excluir columna "TOTAL" si existe
+            if "TOTAL" in minerals_df.columns:
                 minerals_df.drop(columns=["TOTAL"], inplace=True)
-            if "TOTAL" in elements_df:
+            if "TOTAL" in elements_df.columns:
                 elements_df.drop(columns=["TOTAL"], inplace=True)
+
+            # Eliminar columnas con todos los valores 0
+            minerals_df = minerals_df.loc[:, (minerals_df != 0).any(axis=0)]
+            elements_df = elements_df.loc[:, (elements_df != 0).any(axis=0)]
 
             minerals_df.to_excel(
                 writer, sheet_name="Mineralogía", index=False, startrow=0, header=True
